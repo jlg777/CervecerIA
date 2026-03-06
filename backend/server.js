@@ -21,7 +21,7 @@ app.get("/health", (req, res) => {
 // Chat endpoint
 app.post("/chat", async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, sessionId } = req.body;
 
     // Validación
     if (!message || typeof message !== "string") {
@@ -37,11 +37,17 @@ app.post("/chat", async (req, res) => {
     }
 
     // Procesar con el agente
-    const response = await agent.run(message);
+    const safeSessionId =
+      typeof sessionId === "string" && sessionId.trim().length > 0
+        ? sessionId.trim()
+        : req.ip || "default";
+
+    const response = await agent.run(message, safeSessionId);
 
     res.json({
       reply: response.finalOutput,
       success: true,
+      sessionId: safeSessionId,
     });
   } catch (error) {
     console.error("Error en /chat:", error.message);
