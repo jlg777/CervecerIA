@@ -42,7 +42,7 @@ const tools = [
     type: "function",
     function: {
       name: "obtenerReservas",
-      description: "Consulta por las reservas disponibles en la cervecería",
+      description: "Consulta por las reservas disponibles en la cerveceria",
       parameters: {
         type: "object",
         properties: {},
@@ -53,7 +53,7 @@ const tools = [
     type: "function",
     function: {
       name: "cancelarReserva",
-      description: "Cancela la reserva realizada en la cervecería",
+      description: "Cancela la reserva realizada en la cerveceria",
       parameters: {
         type: "object",
         properties: {
@@ -70,7 +70,8 @@ const tools = [
     type: "function",
     function: {
       name: "reservarMesa",
-      description: "Realiza una reserva de mesa en la cervecería",
+      description:
+          "Realiza una reserva de mesa. Solo incluir en la llamada los parámetros que el usuario haya proporcionado explícitamente.",
       parameters: {
         type: "object",
         properties: {
@@ -90,12 +91,11 @@ const tools = [
             type: "string",
             description: "Nombre del cliente",
           },
-          teléfono: {
+          telefono: {
             type: "string",
-            description: "Teléfono de contacto",
+            description: "Telefono de contacto",
           },
         },
-        required: ["fecha", "hora", "personas"],
       },
     },
   },
@@ -103,7 +103,7 @@ const tools = [
     type: "function",
     function: {
       name: "obtenerHorarios",
-      description: "Obtiene los horarios de atención de Wengan",
+      description: "Obtiene los horarios de atencion de Wengan",
       parameters: {
         type: "object",
         properties: {},
@@ -114,7 +114,7 @@ const tools = [
     type: "function",
     function: {
       name: "estaAbierto",
-      description: "Verifica si Wengan está abierto en este momento",
+      description: "Verifica si Wengan esta abierto en este momento",
       parameters: {
         type: "object",
         properties: {},
@@ -151,15 +151,15 @@ const tools = [
           },
           direccion: {
             type: "string",
-            description: "Dirección de entrega",
+            description: "Direccion de entrega",
           },
           nombre: {
             type: "string",
             description: "Nombre del cliente",
           },
-          teléfono: {
+          telefono: {
             type: "string",
-            description: "Teléfono de contacto",
+            description: "Telefono de contacto",
           },
         },
         required: ["items", "direccion", "nombre"],
@@ -168,20 +168,21 @@ const tools = [
   },
 ];
 
-async function executeTool(name, args) {
+async function executeTool(name, args, context = {}) {
   try {
     switch (name) {
       case "recomendarCerveza":
         return recomendarCerveza(args?.tipo || "");
 
       case "reservarMesa":
-        return reservarMesa(
-          args?.fecha,
-          args?.hora,
-          args?.personas,
-          args?.nombre,
-          args?.telefono,
-        );
+        return reservarMesa({
+          sessionId: context.sessionId || "default",
+          fecha: args?.fecha,
+          hora: args?.hora,
+          personas: args?.personas,
+          nombre: args?.nombre,
+          telefono: args?.telefono ?? args?.["teléfono"],
+        });
 
       case "obtenerHorarios":
         return obtenerHorarios();
@@ -209,7 +210,7 @@ async function executeTool(name, args) {
           args?.items,
           args?.direccion,
           args?.nombre,
-          args?.telefono,
+          args?.telefono ?? args?.["teléfono"],
         );
 
       case "obtenerPedidos":
@@ -230,17 +231,41 @@ async function executeTool(name, args) {
 }
 
 class Agent {
-  async run(userMessage) {
-    const messages = [
-      {
-        role: "system",
-        content: instructions,
-      },
-      {
-        role: "user",
-        content: userMessage,
-      },
-    ];
+  constructor() {
+    this.histories = new Map();
+    this.maxMessagesPerSession = 40;
+  }
+
+  getHistory(sessionId) {
+    if (!this.histories.has(sessionId)) {
+      this.histories.set(sessionId, [
+        {
+          role: "system",
+          content: instructions,
+        },
+      ]);
+    }
+
+    return this.histories.get(sessionId);
+  }
+
+  trimHistory(sessionId) {
+    const history = this.histories.get(sessionId);
+    if (!history || history.length <= this.maxMessagesPerSession + 1) {
+      return;
+    }
+
+    const systemMessage = history[0];
+    const tail = history.slice(-this.maxMessagesPerSession);
+    this.histories.set(sessionId, [systemMessage, ...tail]);
+  }
+
+  async run(userMessage, sessionId = "default") {
+    const messages = this.getHistory(sessionId);
+    messages.push({
+      role: "user",
+      content: userMessage,
+    });
 
     let response = await client.chat.completions.create({
       model: "llama-3.1-8b-instant",
@@ -255,22 +280,33 @@ class Agent {
       messages.push(response.choices[0].message);
 
       for (const call of toolCalls) {
-        const result = await executeTool(
-          call.function.name,
-          JSON.parse(call.function.arguments),
-        );
+        let parsedArgs = {};
+        try {
+          parsedArgs = JSON.parse(call.function.arguments || "{}");
+        } catch {
+          parsedArgs = {};
+        }
+
+        const result = await executeTool(call.function.name, parsedArgs, {
+          sessionId,
+        });
+
         messages.push({
           role: "tool",
           tool_call_id: call.id,
           content: JSON.stringify(result),
         });
       }
+
       response = await client.chat.completions.create({
         model: "llama-3.1-8b-instant",
         messages,
         tools,
       });
     }
+
+    messages.push(response.choices[0].message);
+    this.trimHistory(sessionId);
 
     return {
       finalOutput: response.choices[0].message.content,
